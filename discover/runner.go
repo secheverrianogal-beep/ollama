@@ -270,6 +270,7 @@ func GPUDevices(ctx context.Context, runners []ml.FilteredRunnerDiscovery) []ml.
 		}
 
 		slog.Debug("refreshing free memory")
+		refreshTimeout := gpuMemoryRefreshTimeout(len(devices))
 		updated := make([]bool, len(devices))
 		allDone := func() bool {
 			allDone := true
@@ -313,7 +314,7 @@ func GPUDevices(ctx context.Context, runners []ml.FilteredRunnerDiscovery) []ml.
 
 			// Typical refresh on existing runner is ~500ms but allow longer if the system
 			// is under stress before giving up and using stale data.
-			ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			ctx, cancel := context.WithTimeout(ctx, refreshTimeout)
 			defer cancel()
 			start := time.Now()
 			updatedDevices := runner.GetDeviceInfos(ctx)
@@ -337,7 +338,7 @@ func GPUDevices(ctx context.Context, runners []ml.FilteredRunnerDiscovery) []ml.
 
 			// Bootstrapping may take longer in some cases (AMD windows), but we
 			// would rather use stale free data to get the model running sooner
-			rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			rctx, cancel := context.WithTimeout(ctx, refreshTimeout)
 			defer cancel()
 
 			// Apply any device filters to avoid re-discovering unsupported devices
@@ -345,7 +346,7 @@ func GPUDevices(ctx context.Context, runners []ml.FilteredRunnerDiscovery) []ml.
 			devFilter := ml.GetDevicesEnv(devices)
 
 			for dir := range libDirs {
-				updatedDevices := bootstrapDevicesWithMetalRetry(rctx, ctx, 3*time.Second, []string{ml.LibOllamaPath, dir}, devFilter)
+				updatedDevices := bootstrapDevicesWithMetalRetry(rctx, ctx, refreshTimeout, []string{ml.LibOllamaPath, dir}, devFilter)
 				for _, u := range updatedDevices {
 					for i := range devices {
 						if sameRefreshDevice(u, devices[i]) {
@@ -367,6 +368,16 @@ func GPUDevices(ctx context.Context, runners []ml.FilteredRunnerDiscovery) []ml.
 	}
 
 	return append([]ml.DeviceInfo{}, devices...)
+}
+
+func gpuMemoryRefreshTimeout(deviceCount int) time.Duration {
+	// A three-second floor preserves the existing fast path. Large multi-GPU
+	// hosts get a wider budget because discovery cost grows with device count.
+	timeout := time.Duration(deviceCount) * time.Second
+	if timeout < 3*time.Second {
+		return 3 * time.Second
+	}
+	return timeout
 }
 
 func sameRefreshDevice(updated, existing ml.DeviceInfo) bool {
