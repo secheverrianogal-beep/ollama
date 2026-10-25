@@ -307,7 +307,7 @@ func (s *Scheduler) processPending(ctx context.Context) {
 					}
 				} else if maxRunners > 0 && loadedCount >= int(maxRunners) {
 					slog.Debug("max runners achieved, unloading one to make room", "runner_count", loadedCount)
-					runnerToExpire = s.findRunnerToUnload()
+					runnerToExpire = s.findRunnerToUnload(false)
 				} else {
 					// Either no models are loaded or below envconfig.MaxRunners
 					// Get a refreshed GPU list
@@ -368,7 +368,16 @@ func (s *Scheduler) processPending(ctx context.Context) {
 						continue
 					}
 
-					runnerToExpire = s.findRunnerToUnload()
+					runnerToExpire = s.findRunnerToUnload(true)
+					if runnerToExpire == nil {
+						// No resident GPU-backed runner can release VRAM. Keep CPU-only
+						// runners loaded and let llama-server choose partial GPU placement.
+						slog.Warn("no GPU-backed runner available to evict; retrying with partial GPU placement", "model", pending.model.ModelPath)
+						if s.loadFn(pending, systemInfo, gpus, false) {
+							pending.errCh <- errors.New("unable to load model: no GPU-backed runner can be evicted and partial placement failed")
+						}
+						break
+					}
 				}
 
 				if runnerToExpire == nil {
@@ -1711,10 +1720,15 @@ func (s *Scheduler) expireRunnersForRuntimeOOM(model *Model, err error) {
 }
 
 // findRunnerToUnload finds a runner to unload to make room for a new model
-func (s *Scheduler) findRunnerToUnload() *runnerRef {
+func (s *Scheduler) findRunnerToUnload(gpuMemoryPressure bool) *runnerRef {
+	// A VRAM-pressure eviction only helps if the selected runner actually uses
+	// a GPU. Generic MaxRunners eviction may still unload a CPU-only runner.
 	s.loadedMu.Lock()
 	runnerList := make([]*runnerRef, 0, len(s.loaded))
 	for _, r := range s.loaded {
+		if gpuMemoryPressure && len(r.gpus) == 0 {
+			continue
+		}
 		runnerList = append(runnerList, r)
 	}
 	s.loadedMu.Unlock()
