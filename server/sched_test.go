@@ -908,11 +908,35 @@ func TestSchedFindRunnerToUnload(t *testing.T) {
 	s.loaded["b"] = r2
 	s.loadedMu.Unlock()
 
-	resp := s.findRunnerToUnload()
+	resp := s.findRunnerToUnload(false)
 	require.Equal(t, r2, resp)
 	r2.refCount = 1
-	resp = s.findRunnerToUnload()
+	resp = s.findRunnerToUnload(false)
 	require.Equal(t, r1, resp)
+}
+
+func TestSchedFindRunnerToUnloadForGPUPressureSkipsCPUOnly(t *testing.T) {
+	ctx, done := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer done()
+
+	cpuRunner := &runnerRef{sessionDuration: time.Second}
+	gpuRunner := &runnerRef{
+		gpus:           []ml.DeviceID{{Library: "CUDA"}},
+		sessionDuration: 2 * time.Second,
+	}
+
+	s := InitScheduler(ctx)
+	s.loadedMu.Lock()
+	s.loaded["cpu-only"] = cpuRunner
+	s.loaded["gpu-backed"] = gpuRunner
+	s.loadedMu.Unlock()
+
+	require.Equal(t, gpuRunner, s.findRunnerToUnload(true))
+
+	s.loadedMu.Lock()
+	delete(s.loaded, "gpu-backed")
+	s.loadedMu.Unlock()
+	require.Nil(t, s.findRunnerToUnload(true), "CPU-only runner must not be selected to free VRAM")
 }
 
 func TestSchedNeedsReload(t *testing.T) {
@@ -2129,7 +2153,7 @@ func TestSchedLlamaServerEvictsExistingOnPending(t *testing.T) {
 	require.True(t, hasLoadedRunner(s))
 
 	// The findRunnerToUnload should find and return the llama-server runner
-	runner := s.findRunnerToUnload()
+	runner := s.findRunnerToUnload(false)
 	require.NotNil(t, runner)
 }
 
@@ -2247,7 +2271,7 @@ func TestRunnerCanBeEvicted(t *testing.T) {
 	require.Len(t, s.loaded, 1)
 	s.loadedMu.Unlock()
 
-	runner := s.findRunnerToUnload()
+	runner := s.findRunnerToUnload(false)
 	require.NotNil(t, runner)
 	require.Equal(t, "/fake/model", runner.modelPath)
 }
