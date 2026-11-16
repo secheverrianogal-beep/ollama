@@ -1,6 +1,9 @@
 name: SER-170 Gemma 4 parser tests
 
 on:
+  push:
+    branches:
+      - ser-170-github-actions-tests
   workflow_dispatch:
 
 permissions:
