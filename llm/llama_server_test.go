@@ -3274,6 +3274,98 @@ func TestMemoryParsingWriter(t *testing.T) {
 	}
 }
 
+
+func TestMemoryParsingWriterHandlesEveryByteSplit(t *testing.T) {
+	log := []byte(
+		"using device CUDA0 (NVIDIA GPU) (0000:01:00.0) - 1000 MiB free\n" +
+			"load_tensors:        CUDA0 model buffer size =   840.00 MiB\n" +
+			"llama_context:       CUDA0 layer input buffer size =     4.00 MiB (16 layers)\n" +
+			"init_rotation:       CUDA0 rotation buffer size =    23.04 MiB\n" +
+			"main: CUDA0 h_nextn buffer size =    32.00 MiB\n" +
+			"llm_load_tensors: offloaded 4/4 layers to GPU\n",
+	)
+
+	for cut := 1; cut < len(log); cut++ {
+		t.Run(fmt.Sprintf("cut-%d", cut), func(t *testing.T) {
+			runner := &llamaServerRunner{
+				vramByDevice:     make(map[string]uint64),
+				systemFreeAtLoad: make(map[string]uint64),
+			}
+			w := &memoryParsingWriter{inner: io.Discard, runner: runner}
+			if _, err := w.Write(log[:cut]); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.Write(log[cut:]); err != nil {
+				t.Fatal(err)
+			}
+
+			wantVRAM := uint64(840*1024*1024) +
+				uint64(4*1024*1024) +
+				uint64(23.04*1024*1024) +
+				uint64(32*1024*1024)
+			if got := runner.vramByDevice["CUDA0"]; got != wantVRAM {
+				t.Errorf("vramByDevice[CUDA0] = %d, want %d", got, wantVRAM)
+			}
+			if got, want := runner.systemFreeAtLoad["CUDA0"], uint64(1000*1024*1024); got != want {
+				t.Errorf("systemFreeAtLoad[CUDA0] = %d, want %d", got, want)
+			}
+			if runner.gpuLayers != 4 || runner.totalLayers != 4 {
+				t.Errorf("offloaded layers = %d/%d, want 4/4", runner.gpuLayers, runner.totalLayers)
+			}
+		})
+	}
+}
+
+func TestMemoryParsingWriterBoundsOversizedIncompleteLines(t *testing.T) {
+	runner := &llamaServerRunner{vramByDevice: make(map[string]uint64)}
+	w := &memoryParsingWriter{inner: io.Discard, runner: runner}
+
+	oversized := make([]byte, maxMemoryParsingLineBytes+1)
+	for i := range oversized {
+		oversized[i] = 'x'
+	}
+	if _, err := w.Write(oversized); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.pending) != 0 {
+		t.Fatalf("pending buffer retained %d bytes after limit was exceeded", len(w.pending))
+	}
+	if !w.discardingLongLine {
+		t.Fatal("writer did not enter long-line discard mode")
+	}
+
+	validLine := []byte("load_tensors:        CUDA0 model buffer size =   840.00 MiB\n")
+	remainder := append([]byte{'\n'}, validLine...)
+	if _, err := w.Write(remainder); err != nil {
+		t.Fatal(err)
+	}
+	if w.discardingLongLine {
+		t.Fatal("writer did not leave long-line discard mode at the next newline")
+	}
+	if got, want := runner.vramByDevice["CUDA0"], uint64(840*1024*1024); got != want {
+		t.Errorf("vramByDevice[CUDA0] = %d, want %d", got, want)
+	}
+}
+
+func TestMemoryParsingWriterSkipsOversizedCompleteLineAndContinues(t *testing.T) {
+	runner := &llamaServerRunner{vramByDevice: make(map[string]uint64)}
+	w := &memoryParsingWriter{inner: io.Discard, runner: runner}
+
+	oversized := make([]byte, maxMemoryParsingLineBytes+1)
+	for i := range oversized {
+		oversized[i] = 'x'
+	}
+	payload := append(oversized, '\n')
+	payload = append(payload, []byte("load_tensors:        CUDA0 model buffer size =   840.00 MiB\n")...)
+	if _, err := w.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := runner.vramByDevice["CUDA0"], uint64(840*1024*1024); got != want {
+		t.Errorf("vramByDevice[CUDA0] = %d, want %d", got, want)
+	}
+}
+
+
 func TestMemoryParsingWriterRecordsOutputActivityWithoutNewline(t *testing.T) {
 	runner := &llamaServerRunner{}
 	w := &memoryParsingWriter{inner: io.Discard, runner: runner}
