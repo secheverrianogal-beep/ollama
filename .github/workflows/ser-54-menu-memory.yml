@@ -28,6 +28,16 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Generate desktop UI assets
+        run: |
+          go install github.com/tkrajina/typescriptify-golang-structs/tscriptify@latest
+          go generate ./app/ui
+
       - name: Verify Go toolchain
         run: go version
 
