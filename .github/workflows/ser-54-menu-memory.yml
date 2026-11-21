@@ -33,6 +33,10 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Install desktop UI dependencies
+        working-directory: app/ui/app
+        run: npm ci
+
       - name: Generate desktop UI assets
         run: |
           go install github.com/tkrajina/typescriptify-golang-structs/tscriptify@latest
