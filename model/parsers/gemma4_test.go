@@ -1259,6 +1259,53 @@ func TestGemma4Parser_HasThinkingSupport(t *testing.T) {
 	}
 }
 
+func TestGemma4ParserRejectsBeginArgEndArgSyntax(t *testing.T) {
+	parser := &Gemma4Parser{}
+	parser.Init(nil, nil, nil)
+
+	content, thinking, calls, err := parser.Add("<|tool_call>call:run_terminal_command:\nBEGIN_ARG:\nls\nEND_ARG\n", false)
+	if err == nil {
+		t.Fatal("expected unsupported BEGIN_ARG/END_ARG tool-call syntax to return an error")
+	}
+	if !strings.Contains(err.Error(), "BEGIN_ARG/END_ARG") {
+		t.Fatalf("unexpected parser error: %v", err)
+	}
+	if content != "" || thinking != "" || len(calls) != 0 {
+		t.Fatalf("parser returned partial output for invalid tool call: content=%q thinking=%q calls=%v", content, thinking, calls)
+	}
+}
+
+func TestGemma4ParserPropagatesMalformedToolCallErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "closed tool call",
+			input: "<|tool_call>call:foo{not valid}<tool_call|>",
+		},
+		{
+			name:  "unterminated tool call at end of generation",
+			input: "<|tool_call>call:foo{not valid",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser := &Gemma4Parser{}
+			parser.Init(nil, nil, nil)
+
+			content, thinking, calls, err := parser.Add(tt.input, true)
+			if err == nil {
+				t.Fatal("expected malformed tool call to return an error")
+			}
+			if content != "" || thinking != "" || len(calls) != 0 {
+				t.Fatalf("parser returned partial output for malformed tool call: content=%q thinking=%q calls=%v", content, thinking, calls)
+			}
+		})
+	}
+}
+
 func TestParseGemma4ToolCall_InvalidRawQuotedEscape(t *testing.T) {
 	_, err := parseGemma4ToolCall(`call:open_file{path:"C:\users\bob\file.txt"}`, nil)
 	if err == nil {
