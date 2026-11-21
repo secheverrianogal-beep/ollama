@@ -37,6 +37,7 @@ type Gemma4Parser struct {
 	buffer                strings.Builder
 	tools                 []api.Tool
 	callIndex             int
+	parseErr              error
 	hasThinkingSupport    bool
 	thinkingEnabled       bool // true when both model supports and user requested thinking
 	contentPrefill        bool // true when the prompt continues assistant content
@@ -72,6 +73,8 @@ func (p *Gemma4Parser) PreservedTokens() []string {
 func (p *Gemma4Parser) Init(tools []api.Tool, lastMessage *api.Message, thinkValue *api.ThinkValue) []api.Tool {
 	p.tools = tools
 	p.callIndex = 0
+	p.parseErr = nil
+	p.buffer.Reset()
 
 	p.contentPrefill = lastMessage != nil && lastMessage.Role == "assistant" && lastMessage.Content != ""
 
@@ -123,6 +126,29 @@ func (gemma4EventToolCall) isGemma4Event()        {}
 func (p *Gemma4Parser) Add(s string, done bool) (content string, thinking string, calls []api.ToolCall, err error) {
 	p.buffer.WriteString(s)
 	events := p.parseEvents(done)
+
+	if p.parseErr != nil {
+		err := p.parseErr
+		p.parseErr = nil
+		p.buffer.Reset()
+		p.state = Gemma4CollectingContent
+		return "", "", nil, err
+	}
+
+	// BEGIN_ARG/END_ARG is not part of Gemma 4's documented tool-call grammar.
+	// Fail as soon as the incompatible positional form is recognizable rather
+	// than silently dropping the call and allowing generation to continue.
+	if p.state == Gemma4CollectingToolCall {
+		buf := p.buffer.String()
+		if marker := strings.Index(buf, "BEGIN_ARG:"); marker >= 0 {
+			header := strings.TrimSpace(buf[:marker])
+			if strings.HasPrefix(header, "call:") && strings.HasSuffix(header, ":") {
+				p.buffer.Reset()
+				p.state = Gemma4CollectingContent
+				return "", "", nil, errors.New("unsupported Gemma 4 tool-call argument syntax BEGIN_ARG/END_ARG; expected call:NAME{key:value,...}")
+			}
+		}
+	}
 
 	var toolCalls []api.ToolCall
 	var contentSb strings.Builder
@@ -327,6 +353,8 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 				events = append(events, gemma4EventToolCall{toolCall: toolCall})
 			} else {
 				slog.Warn("gemma4 tool call parsing failed", "error", err, "content", toolCallContent)
+				p.parseErr = err
+				return events, false
 			}
 			return events, true
 		}
@@ -340,6 +368,7 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 				events = append(events, gemma4EventToolCall{toolCall: toolCall})
 			} else {
 				slog.Warn("gemma4 tool call flush on done failed", "error", err, "content", bufStr)
+				p.parseErr = err
 			}
 			return events, false
 		}
