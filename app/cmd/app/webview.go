@@ -2,6 +2,7 @@
 
 package main
 
+// #include <stdlib.h>
 // #include "menu.h"
 import "C"
 
@@ -411,33 +412,7 @@ func (w *Webview) Run(path string) unsafe.Pointer {
 			}()
 		})
 
-		wv.Bind("setContextMenuItems", func(items []map[string]interface{}) error {
-			menuMutex.Lock()
-			defer menuMutex.Unlock()
-
-			if len(menuItems) > 0 {
-				pinner.Unpin()
-			}
-
-			menuItems = nil
-			for _, item := range items {
-				menuItem := C.menuItem{
-					label:     C.CString(item["label"].(string)),
-					enabled:   0,
-					separator: 0,
-				}
-
-				if item["enabled"] != nil {
-					menuItem.enabled = 1
-				}
-
-				if item["separator"] != nil {
-					menuItem.separator = 1
-				}
-				menuItems = append(menuItems, menuItem)
-			}
-			return nil
-		})
+		wv.Bind("setContextMenuItems", setContextMenuItems)
 
 		// Debounce resize events
 		var resizeTimer *time.Timer
@@ -500,6 +475,7 @@ func (w *Webview) Terminate() {
 	w.mutex.Lock()
 	if w.webview == nil {
 		w.mutex.Unlock()
+		clearContextMenuItems()
 		return
 	}
 
@@ -508,6 +484,9 @@ func (w *Webview) Terminate() {
 	w.mutex.Unlock()
 	wv.Terminate()
 	wv.Destroy()
+
+	// Native menu callbacks have stopped; release the final C-owned labels.
+	clearContextMenuItems()
 }
 
 func (w *Webview) OnboardingActive() bool {
@@ -521,10 +500,75 @@ func (w *Webview) IsRunning() bool {
 }
 
 var (
-	menuItems []C.menuItem
-	menuMutex sync.RWMutex
-	pinner    runtime.Pinner
+	menuItems       []C.menuItem
+	menuMutex       sync.RWMutex
+	pinner          runtime.Pinner
+	menuItemsPinned bool
 )
+
+// clearMenuItemsLocked releases the C strings and the Go slice previously
+// exposed to the native menu callbacks. The caller must hold menuMutex.
+func clearMenuItemsLocked() {
+	if menuItemsPinned {
+		pinner.Unpin()
+		menuItemsPinned = false
+	}
+
+	for i := range menuItems {
+		if menuItems[i].label != nil {
+			C.free(unsafe.Pointer(menuItems[i].label))
+			menuItems[i].label = nil
+		}
+	}
+	menuItems = nil
+}
+
+// clearContextMenuItems releases all custom menu labels. It is safe to call
+// repeatedly, including when the menu is already empty.
+func clearContextMenuItems() {
+	menuMutex.Lock()
+	defer menuMutex.Unlock()
+	clearMenuItemsLocked()
+}
+
+// setContextMenuItems replaces the native menu labels. The macOS and Windows
+// consumers copy each label while building their native menu, so the previous
+// C strings can be released when a new list is installed.
+func setContextMenuItems(items []map[string]interface{}) error {
+	menuMutex.Lock()
+	defer menuMutex.Unlock()
+
+	clearMenuItemsLocked()
+	for i, item := range items {
+		label, ok := item["label"].(string)
+		if !ok {
+			clearMenuItemsLocked()
+			return fmt.Errorf("context menu item %d has no string label", i)
+		}
+
+		cLabel := C.CString(label)
+		if cLabel == nil {
+			clearMenuItemsLocked()
+			return fmt.Errorf("failed to allocate context menu item %d label", i)
+		}
+
+		menuItem := C.menuItem{
+			label:     cLabel,
+			enabled:   0,
+			separator: 0,
+		}
+
+		if item["enabled"] != nil {
+			menuItem.enabled = 1
+		}
+
+		if item["separator"] != nil {
+			menuItem.separator = 1
+		}
+		menuItems = append(menuItems, menuItem)
+	}
+	return nil
+}
 
 //export menu_get_item_count
 func menu_get_item_count() C.int {
@@ -535,15 +579,18 @@ func menu_get_item_count() C.int {
 
 //export menu_get_items
 func menu_get_items() unsafe.Pointer {
-	menuMutex.RLock()
-	defer menuMutex.RUnlock()
+	menuMutex.Lock()
+	defer menuMutex.Unlock()
 
 	if len(menuItems) == 0 {
 		return nil
 	}
 
-	// Return pointer to the slice data
-	pinner.Pin(&menuItems[0])
+	// Pin the slice backing array only once until the next replacement.
+	if !menuItemsPinned {
+		pinner.Pin(&menuItems[0])
+		menuItemsPinned = true
+	}
 	return unsafe.Pointer(&menuItems[0])
 }
 
