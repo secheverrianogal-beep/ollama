@@ -1,0 +1,35 @@
+name: SER-54 desktop context-menu memory tests
+
+on:
+  push:
+    branches:
+      - fix/ser-54-free-context-menu-labels
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  context-menu-lifecycle:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Verify Go toolchain
+        run: go version
+
+      - name: Context menu lifecycle tests
+        run: go test -count=1 -run 'Test(SetContextMenuItems|ClearContextMenuItems)' ./app/cmd/app
