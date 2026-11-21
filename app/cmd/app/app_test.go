@@ -9,6 +9,101 @@ import (
 	"github.com/ollama/ollama/app/store"
 )
 
+
+func TestSetContextMenuItemsReleasesReplacedLabels(t *testing.T) {
+	clearContextMenuItems()
+	t.Cleanup(clearContextMenuItems)
+
+	items := []map[string]interface{}{
+		{"label": "Rename", "enabled": true},
+		{"label": "Delete", "enabled": true},
+	}
+	if err := setContextMenuItems(items); err != nil {
+		t.Fatal(err)
+	}
+	if len(menuItems) != 2 || menuItems[0].label == nil || menuItems[1].label == nil {
+		t.Fatalf("menu items after first set = %+v", menuItems)
+	}
+
+	// Native menu consumers request the Go-backed array before copying labels.
+	if menu_get_items() == nil || !menuItemsPinned {
+		t.Fatal("menu item array was not pinned for the native consumer")
+	}
+	// A repeated read must not pin the same backing array repeatedly.
+	if menu_get_items() == nil || !menuItemsPinned {
+		t.Fatal("menu item array was not available on repeated read")
+	}
+
+	if err := setContextMenuItems([]map[string]interface{}{{"label": "Open", "enabled": true}}); err != nil {
+		t.Fatal(err)
+	}
+	if menuItemsPinned {
+		t.Fatal("previous menu slice remained pinned after replacement")
+	}
+	if len(menuItems) != 1 || menuItems[0].label == nil {
+		t.Fatalf("replacement menu items = %+v", menuItems)
+	}
+
+	// Replacing the menu with an empty list must release the final label too.
+	if err := setContextMenuItems(nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(menuItems) != 0 || menuItemsPinned {
+		t.Fatalf("menu state after empty replacement = len %d, pinned %v", len(menuItems), menuItemsPinned)
+	}
+}
+
+func TestSetContextMenuItemsCleansPartialAllocationOnInvalidItem(t *testing.T) {
+	clearContextMenuItems()
+	t.Cleanup(clearContextMenuItems)
+
+	err := setContextMenuItems([]map[string]interface{}{
+		{"label": "Rename", "enabled": true},
+		{"label": 42, "enabled": true},
+	})
+	if err == nil {
+		t.Fatal("expected invalid label type to return an error")
+	}
+	if len(menuItems) != 0 || menuItemsPinned {
+		t.Fatalf("partial menu state was retained after error: len %d, pinned %v", len(menuItems), menuItemsPinned)
+	}
+}
+
+func TestClearContextMenuItemsIsIdempotent(t *testing.T) {
+	if err := setContextMenuItems([]map[string]interface{}{{"label": "Rename"}}); err != nil {
+		t.Fatal(err)
+	}
+	if menu_get_items() == nil {
+		t.Fatal("menu item array is nil")
+	}
+
+	clearContextMenuItems()
+	clearContextMenuItems()
+	if len(menuItems) != 0 || menuItemsPinned {
+		t.Fatalf("menu state after repeated clear = len %d, pinned %v", len(menuItems), menuItemsPinned)
+	}
+}
+
+func TestSetContextMenuItemsRepeatedReplacement(t *testing.T) {
+	clearContextMenuItems()
+	t.Cleanup(clearContextMenuItems)
+
+	for range 10000 {
+		if err := setContextMenuItems([]map[string]interface{}{
+			{"label": "Rename", "enabled": true},
+			{"label": "Delete", "enabled": true},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := setContextMenuItems(nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(menuItems) != 0 || menuItemsPinned {
+		t.Fatalf("menu state after repeated replacement = len %d, pinned %v", len(menuItems), menuItemsPinned)
+	}
+}
+
 func TestShouldShowOnboarding(t *testing.T) {
 	tests := []struct {
 		name     string
